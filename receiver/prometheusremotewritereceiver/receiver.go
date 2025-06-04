@@ -425,8 +425,48 @@ func addSummaryDatapoints(_ pmetric.SummaryDataPointSlice, _ labels.Labels, _ wr
 	// TODO: Implement this function
 }
 
-func addHistogramDatapoints(_ pmetric.HistogramDataPointSlice, _ labels.Labels, _ writev2.TimeSeries) {
-	// TODO: Implement this function
+func addHistogramDatapoints(dest pmetric.HistogramDataPointSlice, ls labels.Labels, ts writev2.TimeSeries) {
+	for _, hist := range ts.Histograms {
+		dp := dest.AppendEmpty()
+		dp.SetStartTimestamp(pcommon.Timestamp(ts.CreatedTimestamp * int64(time.Millisecond)))
+		dp.SetTimestamp(pcommon.Timestamp(hist.Timestamp * int64(time.Millisecond)))
+
+		switch c := hist.Count.(type) {
+		case *writev2.Histogram_CountInt:
+			dp.SetCount(c.CountInt)
+		case *writev2.Histogram_CountFloat:
+			dp.SetCount(uint64(c.CountFloat))
+		}
+
+		dp.SetSum(hist.Sum)
+
+		if hist.Schema == -53 {
+			for _, b := range hist.CustomValues {
+				dp.ExplicitBounds().Append(b)
+			}
+			if len(hist.PositiveCounts) > 0 {
+				for _, c := range hist.PositiveCounts {
+					dp.BucketCounts().Append(uint64(c))
+				}
+			} else if len(hist.PositiveDeltas) > 0 {
+				var acc int64
+				for _, d := range hist.PositiveDeltas {
+					acc += d
+					dp.BucketCounts().Append(uint64(acc))
+				}
+			}
+		}
+
+		attributes := dp.Attributes()
+		for _, l := range ls {
+			if l.Name == "instance" || l.Name == "job" ||
+				l.Name == labels.MetricName ||
+				l.Name == "otel_scope_name" || l.Name == "otel_scope_version" {
+				continue
+			}
+			attributes.PutStr(l.Name, l.Value)
+		}
+	}
 }
 
 // extractScopeInfo extracts the scope name and version from the labels. If the labels do not contain the scope name/version,

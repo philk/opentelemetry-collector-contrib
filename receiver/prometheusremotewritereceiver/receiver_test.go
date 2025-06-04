@@ -489,6 +489,65 @@ func TestTranslateV2(t *testing.T) {
 				return metrics
 			}(),
 		},
+		{
+			name: "custom histogram",
+			request: &writev2.Request{
+				Symbols: []string{
+					"",
+					"__name__", "hist_metric", // 1, 2
+					"job", "service/test", // 3,4
+					"instance", "host1", //5,6
+					"foo", "bar", //7,8
+				},
+				Timeseries: []writev2.TimeSeries{
+					{
+						Metadata:   writev2.Metadata{Type: writev2.Metadata_METRIC_TYPE_HISTOGRAM},
+						LabelsRefs: []uint32{1, 2, 3, 4, 5, 6, 7, 8},
+						Histograms: []writev2.Histogram{
+							{
+								Count:          &writev2.Histogram_CountInt{CountInt: 6},
+								Sum:            6,
+								Schema:         -53,
+								PositiveSpans:  []writev2.BucketSpan{{Offset: 0, Length: 3}},
+								PositiveCounts: []float64{1, 2, 3},
+								Timestamp:      1,
+								CustomValues:   []float64{1, 2},
+							},
+						},
+						CreatedTimestamp: 1,
+					},
+				},
+			},
+			expectedMetrics: func() pmetric.Metrics {
+				metrics := pmetric.NewMetrics()
+				rm := metrics.ResourceMetrics().AppendEmpty()
+				attrs := rm.Resource().Attributes()
+				attrs.PutStr("service.namespace", "service")
+				attrs.PutStr("service.name", "test")
+				attrs.PutStr("service.instance.id", "host1")
+
+				sm := rm.ScopeMetrics().AppendEmpty()
+				sm.Scope().SetName("OpenTelemetry Collector")
+				sm.Scope().SetVersion("latest")
+
+				m := sm.Metrics().AppendEmpty()
+				m.SetName("hist_metric")
+				m.SetUnit("")
+				m.SetDescription("")
+
+				dp := m.SetEmptyHistogram().DataPoints().AppendEmpty()
+				dp.SetStartTimestamp(pcommon.Timestamp(1 * int64(time.Millisecond)))
+				dp.SetTimestamp(pcommon.Timestamp(1 * int64(time.Millisecond)))
+				dp.SetCount(6)
+				dp.SetSum(6)
+				dp.ExplicitBounds().FromRaw([]float64{1, 2})
+				dp.BucketCounts().FromRaw([]uint64{1, 2, 3})
+				dp.Attributes().PutStr("foo", "bar")
+
+				return metrics
+			}(),
+			expectedStats: remote.WriteResponseStats{},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// since we are using the rmCache to store values across requests, we need to clear it after each test, otherwise it will affect the next test
