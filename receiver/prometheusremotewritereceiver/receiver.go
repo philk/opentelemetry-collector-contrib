@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strings"
 	"sync"
@@ -16,6 +17,7 @@ import (
 	"github.com/gogo/protobuf/proto"
 	lru "github.com/hashicorp/golang-lru/v2"
 	promconfig "github.com/prometheus/prometheus/config"
+	"github.com/prometheus/prometheus/model/histogram"
 	"github.com/prometheus/prometheus/model/labels"
 	writev2 "github.com/prometheus/prometheus/prompb/io/prometheus/write/v2"
 	promremote "github.com/prometheus/prometheus/storage/remote"
@@ -431,15 +433,17 @@ func addHistogramDatapoints(dest pmetric.HistogramDataPointSlice, ls labels.Labe
 		dp.SetStartTimestamp(pcommon.Timestamp(ts.CreatedTimestamp * int64(time.Millisecond)))
 		dp.SetTimestamp(pcommon.Timestamp(hist.Timestamp * int64(time.Millisecond)))
 
+		var count uint64
 		switch c := hist.Count.(type) {
 		case *writev2.Histogram_CountInt:
-			dp.SetCount(c.CountInt)
+			count = c.CountInt
 		case *writev2.Histogram_CountFloat:
-			dp.SetCount(uint64(c.CountFloat))
+			count = uint64(c.CountFloat)
 		}
-
+		dp.SetCount(count)
 		dp.SetSum(hist.Sum)
 
+		// Handle custom buckets schema.
 		if hist.Schema == -53 {
 			for _, b := range hist.CustomValues {
 				dp.ExplicitBounds().Append(b)
@@ -454,6 +458,25 @@ func addHistogramDatapoints(dest pmetric.HistogramDataPointSlice, ls labels.Labe
 					acc += d
 					dp.BucketCounts().Append(uint64(acc))
 				}
+			}
+		} else {
+			// Translate exponential buckets using the Prometheus histogram utilities.
+			var h *histogram.FloatHistogram
+			if hist.IsFloatHistogram() {
+				h = hist.ToFloatHistogram()
+			} else {
+				h = hist.ToIntHistogram().ToFloat(nil)
+			}
+
+			var prev float64
+			for it := h.AllBucketIterator(); it.Next(); {
+				b := it.At()
+				delta := b.Count - prev
+				prev = b.Count
+				if !math.IsInf(b.Upper, 1) {
+					dp.ExplicitBounds().Append(b.Upper)
+				}
+				dp.BucketCounts().Append(uint64(delta))
 			}
 		}
 

@@ -14,9 +14,12 @@ import (
 	"testing"
 	"time"
 
+	"math"
+
 	"github.com/gogo/protobuf/proto"
 	"github.com/golang/snappy"
 	promconfig "github.com/prometheus/prometheus/config"
+	"github.com/prometheus/prometheus/model/histogram"
 	writev2 "github.com/prometheus/prometheus/prompb/io/prometheus/write/v2"
 	"github.com/prometheus/prometheus/storage/remote"
 	"github.com/stretchr/testify/assert"
@@ -543,6 +546,81 @@ func TestTranslateV2(t *testing.T) {
 				dp.ExplicitBounds().FromRaw([]float64{1, 2})
 				dp.BucketCounts().FromRaw([]uint64{1, 2, 3})
 				dp.Attributes().PutStr("foo", "bar")
+
+				return metrics
+			}(),
+			expectedStats: remote.WriteResponseStats{},
+		},
+		{
+			name: "exponential histogram",
+			request: func() *writev2.Request {
+				h := histogram.Histogram{
+					Schema:          2,
+					ZeroThreshold:   1e-128,
+					Count:           3,
+					Sum:             20,
+					PositiveSpans:   []histogram.Span{{Offset: 0, Length: 1}},
+					PositiveBuckets: []int64{1},
+					NegativeSpans:   []histogram.Span{{Offset: 0, Length: 1}},
+					NegativeBuckets: []int64{2},
+				}
+				return &writev2.Request{
+					Symbols: []string{"", "__name__", "hist_metric", "job", "service/test", "instance", "host1"},
+					Timeseries: []writev2.TimeSeries{
+						{
+							Metadata:         writev2.Metadata{Type: writev2.Metadata_METRIC_TYPE_HISTOGRAM},
+							LabelsRefs:       []uint32{1, 2, 3, 4, 5, 6},
+							Histograms:       []writev2.Histogram{writev2.FromIntHistogram(1, &h)},
+							CreatedTimestamp: 1,
+						},
+					},
+				}
+			}(),
+			expectedMetrics: func() pmetric.Metrics {
+				h := histogram.Histogram{
+					Schema:          2,
+					ZeroThreshold:   1e-128,
+					Count:           3,
+					Sum:             20,
+					PositiveSpans:   []histogram.Span{{Offset: 0, Length: 1}},
+					PositiveBuckets: []int64{1},
+					NegativeSpans:   []histogram.Span{{Offset: 0, Length: 1}},
+					NegativeBuckets: []int64{2},
+				}
+				fh := h.ToFloat(nil)
+				bounds := make([]float64, 0)
+				counts := make([]uint64, 0)
+				var prev float64
+				for it := fh.AllBucketIterator(); it.Next(); {
+					b := it.At()
+					delta := b.Count - prev
+					prev = b.Count
+					if !math.IsInf(b.Upper, 1) {
+						bounds = append(bounds, b.Upper)
+					}
+					counts = append(counts, uint64(delta))
+				}
+
+				metrics := pmetric.NewMetrics()
+				rm := metrics.ResourceMetrics().AppendEmpty()
+				attrs := rm.Resource().Attributes()
+				attrs.PutStr("service.namespace", "service")
+				attrs.PutStr("service.name", "test")
+				attrs.PutStr("service.instance.id", "host1")
+
+				sm := rm.ScopeMetrics().AppendEmpty()
+				sm.Scope().SetName("OpenTelemetry Collector")
+				sm.Scope().SetVersion("latest")
+
+				m := sm.Metrics().AppendEmpty()
+				m.SetName("hist_metric")
+				dp := m.SetEmptyHistogram().DataPoints().AppendEmpty()
+				dp.SetStartTimestamp(pcommon.Timestamp(1 * int64(time.Millisecond)))
+				dp.SetTimestamp(pcommon.Timestamp(1 * int64(time.Millisecond)))
+				dp.SetCount(uint64(fh.Count))
+				dp.SetSum(fh.Sum)
+				dp.ExplicitBounds().FromRaw(bounds)
+				dp.BucketCounts().FromRaw(counts)
 
 				return metrics
 			}(),
